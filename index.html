@@ -96,6 +96,7 @@
     <div class="button-section">
       <button id="sendVCardBtn" onclick="sendVCard()" disabled>Send vCard</button>
       <button id="refreshBtn" onclick="refreshUserInfo()">Refresh User Info</button>
+      <button id="authBtn" onclick="authenticateUser()">Re-authenticate</button>
     </div>
     
     <div class="log-section">
@@ -109,7 +110,7 @@
     const config = {
       clientId: "2be04b1e-0729-4e4f-ab36-07f28ef606b6", // Your client ID
       region: "usw2.pure.cloud", // Your region
-      redirectUri: window.location.origin + window.location.pathname
+      redirectUri: "https://labpeccloud.github.io/vcard.github.io/index.html" // Your exact GitHub Pages URL
     };
 
     // Global variables
@@ -139,13 +140,15 @@
         // Set environment
         genesysClient.setEnvironment(config.region);
         log(`Environment set to: ${config.region}`);
+        log(`Current URL: ${window.location.href}`);
+        log(`Current hash: ${window.location.hash}`);
         
         // Check if we have a hash (token) or need to authenticate
         if (!window.location.hash) {
-          log("No token found, starting authentication...");
+          log("No token found in URL hash, starting authentication...");
           await authenticateUser();
         } else {
-          log("Token found in URL, processing...");
+          log("Token found in URL hash, processing authentication...");
           await processAuthToken();
         }
         
@@ -174,9 +177,13 @@
       try {
         log("Processing authentication token...");
         
-        // The SDK should have automatically processed the token
+        // Try to use loginImplicitGrant which handles the token processing
+        await genesysClient.loginImplicitGrant(config.clientId, config.redirectUri);
+        
+        // Check if authentication was successful
         if (genesysClient.authData && genesysClient.authData.accessToken) {
-          log("Authentication successful!");
+          log("Authentication token processed successfully!");
+          log(`Token expires in: ${genesysClient.authData.tokenExpiryTimeUtcSeconds}`);
           logSuccess("User authenticated successfully");
           document.getElementById("authStatus").innerText = "Authenticated";
           
@@ -190,13 +197,59 @@
           document.getElementById("sendVCardBtn").disabled = false;
           
         } else {
-          throw new Error("No access token found");
+          // Try manual token extraction as fallback
+          log("SDK didn't process token automatically, trying manual extraction...");
+          await extractTokenManually();
         }
         
       } catch (error) {
         logError("Token processing failed:", error);
-        document.getElementById("authStatus").innerText = "Token processing failed";
+        log("Attempting manual token extraction...");
+        await extractTokenManually();
       }
+    }
+
+    // Extract token manually from URL hash
+    async function extractTokenManually() {
+      try {
+        const token = getParameterByName("access_token");
+        const expiresIn = getParameterByName("expires_in");
+        
+        if (token) {
+          log(`Manual token extraction successful. Token: ${token.substring(0, 20)}...`);
+          log(`Token expires in: ${expiresIn} seconds`);
+          
+          // Set the token manually
+          genesysClient.setAccessToken(token);
+          
+          logSuccess("Token set manually");
+          document.getElementById("authStatus").innerText = "Authenticated (Manual)";
+          
+          // Get user information
+          await getUserInfo();
+          
+          // Subscribe to notifications
+          await subscribeToNotifications();
+          
+          // Enable the send vCard button
+          document.getElementById("sendVCardBtn").disabled = false;
+          
+        } else {
+          throw new Error("No access token found in URL hash");
+        }
+        
+      } catch (error) {
+        logError("Manual token extraction failed:", error);
+        document.getElementById("authStatus").innerText = "Authentication failed";
+      }
+    }
+
+    // Helper function to extract parameters from URL hash
+    function getParameterByName(name) {
+      name = name.replace(/[\[]/, "\\[").replace(/[\]]/, "\\]");
+      let regex = new RegExp("[\\#&]" + name + "=([^&#]*)");
+      let results = regex.exec(location.hash);
+      return results === null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
     }
 
     // Get user information
@@ -365,6 +418,20 @@ END:VCARD`;
     // Refresh user information
     async function refreshUserInfo() {
       log("Refreshing user information...");
+      
+      // Check if we have a valid token first
+      if (!genesysClient.authData || !genesysClient.authData.accessToken) {
+        log("No valid token found, checking URL hash...");
+        
+        if (window.location.hash) {
+          await processAuthToken();
+        } else {
+          logError("No authentication token available. Please authenticate first.");
+          document.getElementById("authStatus").innerText = "Not authenticated";
+          return;
+        }
+      }
+      
       await getUserInfo();
     }
 
