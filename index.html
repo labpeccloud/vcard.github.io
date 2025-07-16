@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Genesys Cloud vCard Sender</title>
+  <script type="text/javascript" src="https://sdk-cdn.mypurecloud.com/javascript/181.0.0/purecloud-platform-client-v2.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      margin: 20px;
+      background-color: #f5f5f5;
+    }
+    
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background-color: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .status-section {
+      margin-bottom: 20px;
+      padding: 10px;
+      background-color: #f8f9fa;
+      border-radius: 5px;
+    }
+    
+    .button-section {
+      margin-top: 20px;
+    }
+    
+    button {
+      background-color: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-right: 10px;
+    }
+    
+    button:hover {
+      background-color: #0056b3;
+    }
+    
+    button:disabled {
+      background-color: #6c757d;
+      cursor: not-allowed;
+    }
+    
+    .log-section {
+      margin-top: 20px;
+      padding: 10px;
+      background-color: #f8f9fa;
+      border-radius: 5px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    
+    .log-entry {
+      margin: 5px 0;
+      padding: 5px;
+      background-color: white;
+      border-left: 3px solid #007bff;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    
+    .error {
+      border-left-color: #dc3545;
+      color: #dc3545;
+    }
+    
+    .success {
+      border-left-color: #28a745;
+      color: #28a745;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>Genesys Cloud vCard Sender</h1>
+    
+    <div class="status-section">
+      <h3>Status Information</h3>
+      <div><strong>User:</strong> <span id="userName">Not logged in</span></div>
+      <div><strong>Status:</strong> <span id="userStatus">Unknown</span></div>
+      <div><strong>Authentication:</strong> <span id="authStatus">Not authenticated</span></div>
+    </div>
+    
+    <div class="button-section">
+      <button id="sendVCardBtn" onclick="sendVCard()" disabled>Send vCard</button>
+      <button id="refreshBtn" onclick="refreshUserInfo()">Refresh User Info</button>
+    </div>
+    
+    <div class="log-section">
+      <h3>Debug Log</h3>
+      <div id="logContainer"></div>
+    </div>
+  </div>
+
+  <script>
+    // Configuration - Replace with your actual values
+    const config = {
+      clientId: "a69fd390-cf52-459b-bdb5-e077e8bf1fdc", // Your client ID
+      region: "usw2.pure.cloud", // Your region
+      redirectUri: window.location.origin + window.location.pathname
+    };
+
+    // Global variables
+    let genesysClient;
+    let me;
+    let conversationApi;
+    let usersApi;
+    let notificationsApi;
+    let webSocket;
+
+    // Initialize the application
+    async function initialize() {
+      log("Starting initialization...");
+      
+      try {
+        // Get Genesys SDK reference
+        const genesysSDK = window.require('platformClient');
+        genesysClient = genesysSDK.ApiClient.instance;
+        
+        log("Genesys SDK loaded successfully");
+        
+        // Initialize API instances
+        conversationApi = new genesysSDK.ConversationsApi();
+        usersApi = new genesysSDK.UsersApi();
+        notificationsApi = new genesysSDK.NotificationsApi();
+        
+        // Set environment
+        genesysClient.setEnvironment(config.region);
+        log(`Environment set to: ${config.region}`);
+        
+        // Check if we have a hash (token) or need to authenticate
+        if (!window.location.hash) {
+          log("No token found, starting authentication...");
+          await authenticateUser();
+        } else {
+          log("Token found in URL, processing...");
+          await processAuthToken();
+        }
+        
+      } catch (error) {
+        logError("Initialization failed:", error);
+      }
+    }
+
+    // Authenticate user using implicit grant
+    async function authenticateUser() {
+      try {
+        log(`Starting OAuth with client ID: ${config.clientId}`);
+        log(`Redirect URI: ${config.redirectUri}`);
+        
+        await genesysClient.loginImplicitGrant(config.clientId, config.redirectUri);
+        log("Authentication request sent - redirecting...");
+        
+      } catch (error) {
+        logError("Authentication failed:", error);
+        document.getElementById("authStatus").innerText = "Authentication failed";
+      }
+    }
+
+    // Process the authentication token
+    async function processAuthToken() {
+      try {
+        log("Processing authentication token...");
+        
+        // The SDK should have automatically processed the token
+        if (genesysClient.authData && genesysClient.authData.accessToken) {
+          log("Authentication successful!");
+          logSuccess("User authenticated successfully");
+          document.getElementById("authStatus").innerText = "Authenticated";
+          
+          // Get user information
+          await getUserInfo();
+          
+          // Subscribe to notifications
+          await subscribeToNotifications();
+          
+          // Enable the send vCard button
+          document.getElementById("sendVCardBtn").disabled = false;
+          
+        } else {
+          throw new Error("No access token found");
+        }
+        
+      } catch (error) {
+        logError("Token processing failed:", error);
+        document.getElementById("authStatus").innerText = "Token processing failed";
+      }
+    }
+
+    // Get user information
+    async function getUserInfo() {
+      try {
+        log("Fetching user information...");
+        
+        me = await usersApi.getUsersMe({ expand: "presence" });
+        
+        log(`User info retrieved: ${me.name} (ID: ${me.id})`);
+        
+        // Update UI
+        document.getElementById("userName").innerText = me.name;
+        document.getElementById("userStatus").innerText = me.presence.presenceDefinition.systemPresence;
+        
+        logSuccess(`Logged in as: ${me.name}`);
+        
+      } catch (error) {
+        logError("Failed to get user info:", error);
+      }
+    }
+
+    // Subscribe to notifications
+    async function subscribeToNotifications() {
+      try {
+        log("Setting up notification subscription...");
+        
+        if (!me) {
+          log("No user info available, skipping notifications");
+          return;
+        }
+        
+        // Get or create notification channel
+        const channels = await notificationsApi.getNotificationsChannels({});
+        let channel;
+        
+        if (!channels || !channels.entities || channels.entities.length === 0) {
+          log("Creating new notification channel...");
+          channel = await notificationsApi.postNotificationsChannels();
+        } else {
+          log("Using existing notification channel...");
+          channel = channels.entities[channels.entities.length - 1];
+        }
+        
+        // Create websocket connection
+        log(`Connecting to websocket: ${channel.connectUri}`);
+        webSocket = new WebSocket(channel.connectUri);
+        
+        webSocket.onopen = function(event) {
+          log("Websocket connection opened");
+          logSuccess("Notification system connected");
+        };
+        
+        webSocket.onmessage = function(event) {
+          const data = JSON.parse(event.data);
+          if (data.topicName !== 'channel.metadata') {
+            log(`Notification received: ${data.topicName}`);
+          }
+        };
+        
+        webSocket.onerror = function(event) {
+          logError("Websocket error:", event);
+        };
+        
+        // Subscribe to user presence and conversation topics
+        const topics = [
+          `v2.users.${me.id}.presence`,
+          `v2.users.${me.id}.conversations`
+        ];
+        
+        await notificationsApi.postNotificationsChannelSubscriptions(channel.id, topics);
+        log("Subscribed to notification topics");
+        
+      } catch (error) {
+        logError("Failed to setup notifications:", error);
+      }
+    }
+
+    // Create messaging conversation
+    async function createMessagingConversation(toAddress, fromAddress) {
+      try {
+        log("Creating messaging conversation...");
+        
+        const body = {
+          toAddress: toAddress,
+          fromAddress: fromAddress,
+          toAddressMessengerType: "sms", // or "open" for other messaging types
+          textBody: "Test message from Genesys Cloud vCard sender"
+        };
+        
+        log(`Creating conversation with body:`, body);
+        
+        const conversation = await conversationApi.postConversationsMessages(body);
+        
+        log(`Conversation created successfully: ${conversation.id}`);
+        logSuccess(`Messaging conversation created: ${conversation.id}`);
+        
+        return conversation;
+        
+      } catch (error) {
+        logError("Failed to create messaging conversation:", error);
+        throw error;
+      }
+    }
+
+    // Generate vCard
+    function generateVCard() {
+      if (!me) {
+        log("No user information available for vCard generation");
+        return null;
+      }
+      
+      const vcard = `BEGIN:VCARD
+VERSION:3.0
+FN:${me.name}
+N:${me.name};;;;
+ORG:${me.department || 'Organization'}
+TITLE:${me.title || 'Agent'}
+EMAIL:${me.email || ''}
+TEL:${me.phoneNumber || ''}
+END:VCARD`;
+      
+      log("vCard generated:");
+      log(vcard);
+      
+      return vcard;
+    }
+
+    // Main function to send vCard
+    async function sendVCard() {
+      try {
+        log("Send vCard button clicked");
+        
+        if (!me) {
+          logError("User not authenticated");
+          return;
+        }
+        
+        // For demo purposes, using placeholder phone numbers
+        // In real implementation, you'd get these from the active call
+        const toAddress = "+1234567890"; // Customer's phone number
+        const fromAddress = "+0987654321"; // Your SMS number
+        
+        log(`Attempting to send vCard to: ${toAddress}`);
+        
+        // Generate vCard
+        const vcard = generateVCard();
+        if (!vcard) {
+          logError("Failed to generate vCard");
+          return;
+        }
+        
+        // Create messaging conversation
+        const conversation = await createMessagingConversation(toAddress, fromAddress);
+        
+        logSuccess("vCard sent successfully!");
+        
+        // TODO: In next iteration, we'll add the actual vCard sending logic
+        log("Next steps: Send vCard content through the conversation");
+        
+      } catch (error) {
+        logError("Failed to send vCard:", error);
+      }
+    }
+
+    // Refresh user information
+    async function refreshUserInfo() {
+      log("Refreshing user information...");
+      await getUserInfo();
+    }
+
+    // Logging functions
+    function log(message, data = null) {
+      const timestamp = new Date().toLocaleTimeString();
+      const logEntry = `[${timestamp}] ${message}`;
+      
+      console.log(logEntry, data || '');
+      
+      const logContainer = document.getElementById("logContainer");
+      const logDiv = document.createElement("div");
+      logDiv.className = "log-entry";
+      logDiv.textContent = logEntry + (data ? ` ${JSON.stringify(data)}` : '');
+      
+      logContainer.appendChild(logDiv);
+      logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    function logError(message, error = null) {
+      const timestamp = new Date().toLocaleTimeString();
+      const logEntry = `[${timestamp}] ERROR: ${message}`;
+      
+      console.error(logEntry, error || '');
+      
+      const logContainer = document.getElementById("logContainer");
+      const logDiv = document.createElement("div");
+      logDiv.className = "log-entry error";
+      logDiv.textContent = logEntry + (error ? ` ${error.message || JSON.stringify(error)}` : '');
+      
+      logContainer.appendChild(logDiv);
+      logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    function logSuccess(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      const logEntry = `[${timestamp}] SUCCESS: ${message}`;
+      
+      console.log(logEntry);
+      
+      const logContainer = document.getElementById("logContainer");
+      const logDiv = document.createElement("div");
+      logDiv.className = "log-entry success";
+      logDiv.textContent = logEntry;
+      
+      logContainer.appendChild(logDiv);
+      logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    // Initialize when page loads
+    window.onload = initialize;
+  </script>
+</body>
+
+</html>
