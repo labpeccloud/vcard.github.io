@@ -656,13 +656,21 @@ END:VCARD`;
         
         log("📦 Created multipart form data with file");
         
+        // Prepare headers with authentication
+        const headers = {
+          'Authorization': `Bearer ${genesysClient.authData.accessToken}`
+          // Note: Don't set Content-Type header - let browser set it with boundary for multipart
+        };
+        
+        log("🔑 Added authorization header for upload");
+        
         // Perform the upload
-        log("🚀 Sending multipart POST request to upload destination...");
+        log("🚀 Sending authenticated multipart POST request to upload destination...");
         
         const uploadResponse = await fetch(uploadDestinationUri, {
           method: 'POST',
+          headers: headers,
           body: formData
-          // Note: Don't set Content-Type header - let browser set it with boundary for multipart
         });
         
         log(`📥 Upload Response Status: ${uploadResponse.status} ${uploadResponse.statusText}`);
@@ -670,6 +678,17 @@ END:VCARD`;
         if (!uploadResponse.ok) {
           const errorText = await uploadResponse.text();
           log(`📥 Upload Error Response Body: ${errorText}`);
+          
+          // Check for specific error types
+          if (uploadResponse.status === 401) {
+            logError("🔑 Authentication failed - token may be expired or invalid");
+            logError("💡 Try refreshing your authentication or check token permissions");
+          } else if (uploadResponse.status === 403) {
+            logError("🚫 Access forbidden - check workspace permissions");
+          } else if (uploadResponse.status === 413) {
+            logError("📁 File too large - check file size limits");
+          }
+          
           throw new Error(`Upload failed with status: ${uploadResponse.status} - ${errorText}`);
         }
         
