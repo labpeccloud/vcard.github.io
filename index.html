@@ -93,6 +93,11 @@
       <div><strong>Authentication:</strong> <span id="authStatus">Not authenticated</span></div>
     </div>
     
+    <div class="status-section">
+      <h3>Conversation Information</h3>
+      <div id="conversationInfo">No active conversation detected</div>
+    </div>
+    
     <div class="button-section">
       <button id="sendVCardBtn" onclick="sendVCard()" disabled>Send vCard</button>
       <button id="refreshBtn" onclick="refreshUserInfo()">Refresh User Info</button>
@@ -108,7 +113,7 @@
   <script>
     // Configuration - Replace with your actual values
     const config = {
-      clientId: "2be04b1e-0729-4e4f-ab36-07f28ef606b6", // Your client ID
+      clientId: "a69fd390-cf52-459b-bdb5-e077e8bf1fdc", // Your client ID
       region: "usw2.pure.cloud", // Your region
       redirectUri: "https://labpeccloud.github.io/vcard.github.io/index.html" // Your exact GitHub Pages URL
     };
@@ -119,7 +124,14 @@
     let conversationApi;
     let usersApi;
     let notificationsApi;
+    let contentManagementApi;
     let webSocket;
+    
+    // Variables to store conversation data from notifications
+    let v_toaddress = null;
+    let v_conversationId = null;
+    let v_workspace_id = null;
+    let v_sms_from_address = null;
 
     // Initialize the application
     async function initialize() {
@@ -136,6 +148,7 @@
         conversationApi = new genesysSDK.ConversationsApi();
         usersApi = new genesysSDK.UsersApi();
         notificationsApi = new genesysSDK.NotificationsApi();
+        contentManagementApi = new genesysSDK.ContentManagementApi();
         
         // Set environment
         genesysClient.setEnvironment(config.region);
@@ -187,7 +200,76 @@
           logSuccess("User authenticated successfully");
           document.getElementById("authStatus").innerText = "Authenticated";
           
-          // Get user information
+          // Process conversation notifications
+    function processConversationNotification(data) {
+      try {
+        log("Processing conversation notification...");
+        log(`Notification data:`, data);
+        
+        if (data.eventBody && data.eventBody.participants) {
+          // Store conversation ID
+          if (data.eventBody.id) {
+            v_conversationId = data.eventBody.id;
+            log(`Stored conversation ID: ${v_conversationId}`);
+          }
+          
+          // Find customer participant
+          const customerParticipant = data.eventBody.participants.find(p => p.purpose === 'customer');
+          
+          if (customerParticipant) {
+            log("Found customer participant:", customerParticipant);
+            
+            // 1. Get customer address
+            if (customerParticipant.address) {
+              v_toaddress = customerParticipant.address;
+              log(`Stored customer address: ${v_toaddress}`);
+            }
+            
+            // 3. Get attributes from customer participant
+            if (customerParticipant.attributes) {
+              log("Processing customer attributes:", customerParticipant.attributes);
+              
+              if (customerParticipant.attributes.workspace_id) {
+                v_workspace_id = customerParticipant.attributes.workspace_id;
+                log(`Stored workspace ID: ${v_workspace_id}`);
+              }
+              
+              if (customerParticipant.attributes.sms_from_address) {
+                v_sms_from_address = customerParticipant.attributes.sms_from_address;
+                log(`Stored SMS from address: ${v_sms_from_address}`);
+              }
+            } else {
+              log("No attributes found in customer participant");
+            }
+            
+            // Update UI with conversation info
+            updateConversationInfo();
+            
+          } else {
+            log("No customer participant found in conversation");
+          }
+        } else {
+          log("No participants found in notification event body");
+        }
+        
+      } catch (error) {
+        logError("Error processing conversation notification:", error);
+      }
+    }
+
+    // Update UI with conversation information
+    function updateConversationInfo() {
+      const conversationInfo = document.getElementById("conversationInfo");
+      if (conversationInfo) {
+        conversationInfo.innerHTML = `
+          <strong>Active Conversation:</strong><br>
+          ID: ${v_conversationId || 'None'}<br>
+          Customer: ${v_toaddress || 'None'}<br>
+          Workspace ID: ${v_workspace_id || 'None'}<br>
+          SMS From: ${v_sms_from_address || 'None'}
+        `;
+      }
+    }
           await getUserInfo();
           
           // Subscribe to notifications
@@ -307,6 +389,11 @@
           const data = JSON.parse(event.data);
           if (data.topicName !== 'channel.metadata') {
             log(`Notification received: ${data.topicName}`);
+            
+            // Process conversation notifications
+            if (data.topicName && data.topicName.includes('conversations')) {
+              processConversationNotification(data);
+            }
           }
         };
         
@@ -355,14 +442,18 @@
       }
     }
 
-    // Generate vCard
-    function generateVCard() {
+    // Generate vCard and upload to content management
+    async function generateVCard() {
       if (!me) {
-        log("No user information available for vCard generation");
+        logError("No user information available for vCard generation");
         return null;
       }
       
-      const vcard = `BEGIN:VCARD
+      try {
+        log("Starting vCard generation process...");
+        
+        // Generate vCard content
+        const vcard = `BEGIN:VCARD
 VERSION:3.0
 FN:${me.name}
 N:${me.name};;;;
@@ -371,11 +462,150 @@ TITLE:${me.title || 'Agent'}
 EMAIL:${me.email || ''}
 TEL:${me.phoneNumber || ''}
 END:VCARD`;
-      
-      log("vCard generated:");
-      log(vcard);
-      
-      return vcard;
+        
+        log("vCard content generated:");
+        log(vcard);
+        
+        // Check if we have workspace_id from conversation
+        if (!v_workspace_id) {
+          logError("No workspace ID available. Make sure you're in an active conversation.");
+          return null;
+        }
+        
+        log(`Using workspace ID: ${v_workspace_id}`);
+        
+        // Upload vCard to content management
+        const documentResult = await uploadVCardToWorkspace(vcard);
+        
+        if (documentResult) {
+          logSuccess("vCard generated and uploaded successfully!");
+          return documentResult;
+        } else {
+          logError("Failed to upload vCard to workspace");
+          return null;
+        }
+        
+      } catch (error) {
+        logError("Error in vCard generation process:", error);
+        return null;
+      }
+    }
+
+    // Upload vCard to content management workspace
+    async function uploadVCardToWorkspace(vcardContent) {
+      try {
+        log("Step 1: Preparing vCard file for upload...");
+        
+        // Create filename with timestamp
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `agent-${me.name.replace(/\s+/g, '_')}-${timestamp}.vcf`;
+        
+        log(`Generated filename: ${filename}`);
+        
+        // Convert vCard content to blob
+        const blob = new Blob([vcardContent], { type: 'text/vcard' });
+        log(`Blob created with size: ${blob.size} bytes`);
+        
+        // Step 2: Create document in workspace
+        log("Step 2: Creating document in workspace...");
+        
+        const createDocumentBody = {
+          name: filename,
+          workspace: {
+            id: v_workspace_id
+          },
+          filename: filename,
+          contentType: 'text/vcard'
+        };
+        
+        log("Document creation request body:", createDocumentBody);
+        
+        const document = await contentManagementApi.postContentmanagementDocuments(createDocumentBody);
+        
+        log("Step 3: Document created successfully!");
+        log(`Document ID: ${document.id}`);
+        log(`Upload URL: ${document.uploadDestinationUri}`);
+        
+        // Step 4: Upload file content to the provided URL
+        log("Step 4: Uploading vCard content to document...");
+        
+        const uploadResponse = await fetch(document.uploadDestinationUri, {
+          method: 'PUT',
+          body: blob,
+          headers: {
+            'Content-Type': 'text/vcard'
+          }
+        });
+        
+        if (!uploadResponse.ok) {
+          throw new Error(`Upload failed with status: ${uploadResponse.status}`);
+        }
+        
+        log("Step 5: File content uploaded successfully!");
+        
+        // Step 6: Monitor upload status
+        log("Step 6: Monitoring upload status...");
+        
+        const finalDocument = await monitorUploadStatus(document.id);
+        
+        if (finalDocument) {
+          // Step 7: Get sharing URI
+          log("Step 7: Retrieving document sharing URI...");
+          const documentDetails = await contentManagementApi.getContentmanagementDocument(finalDocument.id);
+          
+          log("Document upload completed successfully!");
+          log(`Final Document ID: ${documentDetails.id}`);
+          log(`Sharing URI: ${documentDetails.sharingUri || 'Not available'}`);
+          
+          logSuccess(`vCard uploaded! Document ID: ${documentDetails.id}`);
+          
+          return {
+            documentId: documentDetails.id,
+            sharingUri: documentDetails.sharingUri,
+            filename: filename
+          };
+        }
+        
+        return null;
+        
+      } catch (error) {
+        logError("Error uploading vCard to workspace:", error);
+        return null;
+      }
+    }
+
+    // Monitor upload status
+    async function monitorUploadStatus(documentId, maxRetries = 10) {
+      try {
+        log(`Monitoring upload status for document ID: ${documentId}`);
+        
+        for (let i = 0; i < maxRetries; i++) {
+          log(`Status check attempt ${i + 1}/${maxRetries}...`);
+          
+          const document = await contentManagementApi.getContentmanagementDocument(documentId);
+          
+          log(`Current upload status: ${document.uploadStatus?.status || 'Unknown'}`);
+          
+          if (document.uploadStatus?.status === 'UPLOAD_SUCCESS') {
+            logSuccess("Upload completed successfully!");
+            return document;
+          } else if (document.uploadStatus?.status === 'UPLOAD_FAILED') {
+            logError("Upload failed!");
+            return null;
+          }
+          
+          // Wait 2 seconds before next check
+          log("Waiting 2 seconds before next status check...");
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        
+        logError("Upload status monitoring timed out");
+        return null;
+        
+      } catch (error) {
+        logError("Error monitoring upload status:", error);
+        return null;
+      }
     }
 
     // Main function to send vCard
@@ -388,27 +618,31 @@ END:VCARD`;
           return;
         }
         
-        // For demo purposes, using placeholder phone numbers
-        // In real implementation, you'd get these from the active call
-        const toAddress = "+1234567890"; // Customer's phone number
-        const fromAddress = "+0987654321"; // Your SMS number
-        
-        log(`Attempting to send vCard to: ${toAddress}`);
-        
-        // Generate vCard
-        const vcard = generateVCard();
-        if (!vcard) {
-          logError("Failed to generate vCard");
+        // Check if we have conversation data from notifications
+        if (!v_conversationId || !v_toaddress) {
+          logError("No active conversation detected. Please ensure you're in an active conversation with a customer.");
           return;
         }
         
-        // Create messaging conversation
-        const conversation = await createMessagingConversation(toAddress, fromAddress);
+        log(`Using conversation data from notifications:`);
+        log(`- Conversation ID: ${v_conversationId}`);
+        log(`- Customer address: ${v_toaddress}`);
+        log(`- Workspace ID: ${v_workspace_id}`);
+        log(`- SMS from address: ${v_sms_from_address}`);
         
-        logSuccess("vCard sent successfully!");
+        // Generate vCard and upload to workspace
+        const vcardResult = await generateVCard();
+        if (!vcardResult) {
+          logError("Failed to generate and upload vCard");
+          return;
+        }
         
-        // TODO: In next iteration, we'll add the actual vCard sending logic
-        log("Next steps: Send vCard content through the conversation");
+        logSuccess("vCard process completed successfully!");
+        log(`Document ID: ${vcardResult.documentId}`);
+        log(`Sharing URI: ${vcardResult.sharingUri}`);
+        
+        // TODO: In next iteration, we can send the sharing URI via SMS
+        log("Next step: Send sharing URI via SMS to customer");
         
       } catch (error) {
         logError("Failed to send vCard:", error);
