@@ -102,6 +102,7 @@
       <button id="sendVCardBtn" onclick="sendVCard()" disabled>Send vCard</button>
       <button id="refreshBtn" onclick="refreshUserInfo()">Refresh User Info</button>
       <button id="authBtn" onclick="authenticateUser()">Re-authenticate</button>
+      <button id="checkConversationBtn" onclick="getActiveConversation()">Check Active Conversations</button>
     </div>
     
     <div class="log-section">
@@ -204,52 +205,90 @@
     function processConversationNotification(data) {
       try {
         log("Processing conversation notification...");
-        log(`Notification data:`, data);
+        log(`Topic: ${data.topicName}`);
+        log(`Event Body:`, JSON.stringify(data.eventBody, null, 2));
         
         if (data.eventBody && data.eventBody.participants) {
           // Store conversation ID
           if (data.eventBody.id) {
             v_conversationId = data.eventBody.id;
-            log(`Stored conversation ID: ${v_conversationId}`);
+            log(`✓ Stored conversation ID: ${v_conversationId}`);
           }
           
           // Find customer participant
           const customerParticipant = data.eventBody.participants.find(p => p.purpose === 'customer');
           
           if (customerParticipant) {
-            log("Found customer participant:", customerParticipant);
+            log("✓ Found customer participant:");
+            log(`  - ID: ${customerParticipant.id}`);
+            log(`  - Name: ${customerParticipant.name}`);
+            log(`  - Purpose: ${customerParticipant.purpose}`);
             
             // 1. Get customer address
             if (customerParticipant.address) {
               v_toaddress = customerParticipant.address;
-              log(`Stored customer address: ${v_toaddress}`);
+              log(`✓ Stored customer address: ${v_toaddress}`);
+            } else {
+              log("⚠ No address found in customer participant");
             }
             
             // 3. Get attributes from customer participant
             if (customerParticipant.attributes) {
-              log("Processing customer attributes:", customerParticipant.attributes);
+              log("✓ Customer attributes found:");
+              log(JSON.stringify(customerParticipant.attributes, null, 2));
               
               if (customerParticipant.attributes.workspace_id) {
                 v_workspace_id = customerParticipant.attributes.workspace_id;
-                log(`Stored workspace ID: ${v_workspace_id}`);
+                log(`✓ Stored workspace ID: ${v_workspace_id}`);
+              } else {
+                log("⚠ No workspace_id found in attributes");
               }
               
               if (customerParticipant.attributes.sms_from_address) {
                 v_sms_from_address = customerParticipant.attributes.sms_from_address;
-                log(`Stored SMS from address: ${v_sms_from_address}`);
+                log(`✓ Stored SMS from address: ${v_sms_from_address}`);
+              } else {
+                log("⚠ No sms_from_address found in attributes");
               }
+              
+              // Log all available attributes for debugging
+              log("All customer attributes:");
+              Object.keys(customerParticipant.attributes).forEach(key => {
+                log(`  - ${key}: ${customerParticipant.attributes[key]}`);
+              });
+              
             } else {
-              log("No attributes found in customer participant");
+              log("⚠ No attributes object found in customer participant");
             }
             
             // Update UI with conversation info
             updateConversationInfo();
             
+            // Log final state
+            log("Final conversation variables state:");
+            log(`  - v_conversationId: ${v_conversationId}`);
+            log(`  - v_toaddress: ${v_toaddress}`);
+            log(`  - v_workspace_id: ${v_workspace_id}`);
+            log(`  - v_sms_from_address: ${v_sms_from_address}`);
+            
+            // Check if we have minimum required data
+            if (v_conversationId && v_toaddress) {
+              logSuccess("Conversation data successfully extracted from notification!");
+              document.getElementById("sendVCardBtn").style.backgroundColor = "#28a745"; // Green
+            } else {
+              logError("Missing required conversation data (conversationId or customer address)");
+            }
+            
           } else {
-            log("No customer participant found in conversation");
+            log("⚠ No customer participant found in conversation");
+            log("Available participants:");
+            data.eventBody.participants.forEach((p, index) => {
+              log(`  ${index + 1}. ID: ${p.id}, Purpose: ${p.purpose}, Name: ${p.name || 'Unknown'}`);
+            });
           }
         } else {
-          log("No participants found in notification event body");
+          log("⚠ No participants found in notification event body");
+          log("Event body structure:", Object.keys(data.eventBody || {}));
         }
         
       } catch (error) {
@@ -261,12 +300,20 @@
     function updateConversationInfo() {
       const conversationInfo = document.getElementById("conversationInfo");
       if (conversationInfo) {
+        const hasRequiredData = v_conversationId && v_toaddress;
+        const statusIcon = hasRequiredData ? "✅" : "⚠️";
+        
         conversationInfo.innerHTML = `
-          <strong>Active Conversation:</strong><br>
-          ID: ${v_conversationId || 'None'}<br>
-          Customer: ${v_toaddress || 'None'}<br>
-          Workspace ID: ${v_workspace_id || 'None'}<br>
-          SMS From: ${v_sms_from_address || 'None'}
+          ${statusIcon} <strong>Active Conversation:</strong><br>
+          <div style="margin-left: 10px; font-family: monospace; font-size: 12px;">
+            <div><strong>ID:</strong> ${v_conversationId || '❌ None'}</div>
+            <div><strong>Customer:</strong> ${v_toaddress || '❌ None'}</div>
+            <div><strong>Workspace ID:</strong> ${v_workspace_id || '❌ None'}</div>
+            <div><strong>SMS From:</strong> ${v_sms_from_address || '❌ None'}</div>
+          </div>
+          <div style="margin-top: 5px; font-size: 11px; color: ${hasRequiredData ? '#28a745' : '#dc3545'};">
+            ${hasRequiredData ? 'Ready to send vCard!' : 'Missing required conversation data'}
+          </div>
         `;
       }
     }
@@ -387,13 +434,20 @@
         
         webSocket.onmessage = function(event) {
           const data = JSON.parse(event.data);
-          if (data.topicName !== 'channel.metadata') {
-            log(`Notification received: ${data.topicName}`);
-            
-            // Process conversation notifications
-            if (data.topicName && data.topicName.includes('conversations')) {
-              processConversationNotification(data);
-            }
+          
+          // Skip heartbeat messages
+          if (data.topicName === 'channel.metadata') {
+            return;
+          }
+          
+          log(`📨 Notification received: ${data.topicName}`);
+          
+          // Process conversation notifications
+          if (data.topicName && data.topicName.includes('conversations')) {
+            log("🔄 Processing conversation notification...");
+            processConversationNotification(data);
+          } else {
+            log(`ℹ️ Other notification type: ${data.topicName}`);
           }
         };
         
@@ -407,8 +461,14 @@
           `v2.users.${me.id}.conversations`
         ];
         
+        log(`Subscribing to topics: ${topics.join(', ')}`);
+        
         await notificationsApi.postNotificationsChannelSubscriptions(channel.id, topics);
-        log("Subscribed to notification topics");
+        log("Subscribed to notification topics successfully");
+        
+        // Also try to get current active conversations
+        log("Checking for existing active conversations...");
+        await getActiveConversation();
         
       } catch (error) {
         logError("Failed to setup notifications:", error);
@@ -618,13 +678,28 @@ END:VCARD`;
           return;
         }
         
+        // Debug: Show current conversation variables
+        log("Current conversation variables:");
+        log(`- v_conversationId: ${v_conversationId}`);
+        log(`- v_toaddress: ${v_toaddress}`);
+        log(`- v_workspace_id: ${v_workspace_id}`);
+        log(`- v_sms_from_address: ${v_sms_from_address}`);
+        
         // Check if we have conversation data from notifications
         if (!v_conversationId || !v_toaddress) {
-          logError("No active conversation detected. Please ensure you're in an active conversation with a customer.");
-          return;
+          log("No conversation data from notifications. Attempting to fetch active conversations...");
+          
+          // Fallback: Try to get active conversation data directly
+          const activeConversation = await getActiveConversation();
+          
+          if (!activeConversation) {
+            logError("No active conversation detected. Please ensure you're in an active conversation with a customer.");
+            logError("Make sure you have an active call or messaging conversation with a customer.");
+            return;
+          }
         }
         
-        log(`Using conversation data from notifications:`);
+        log(`Using conversation data:`);
         log(`- Conversation ID: ${v_conversationId}`);
         log(`- Customer address: ${v_toaddress}`);
         log(`- Workspace ID: ${v_workspace_id}`);
@@ -646,6 +721,76 @@ END:VCARD`;
         
       } catch (error) {
         logError("Failed to send vCard:", error);
+      }
+    }
+
+    // Fallback method to get active conversation data
+    async function getActiveConversation() {
+      try {
+        log("Fetching active conversations for current user...");
+        
+        // Get active calls
+        const callConversations = await conversationApi.getConversationsCalls();
+        log(`Found ${callConversations.entities?.length || 0} call conversations`);
+        
+        // Get active chats/messages
+        const chatConversations = await conversationApi.getConversationsChats();
+        log(`Found ${chatConversations.entities?.length || 0} chat conversations`);
+        
+        // Combine all conversations
+        const allConversations = [
+          ...(callConversations.entities || []),
+          ...(chatConversations.entities || [])
+        ];
+        
+        log(`Total conversations found: ${allConversations.length}`);
+        
+        // Find conversation where current user is connected
+        for (const conversation of allConversations) {
+          log(`Checking conversation ${conversation.id}...`);
+          
+          const agentParticipant = conversation.participants.find(p => 
+            (p.purpose === 'agent' || p.purpose === 'user') && 
+            p.state === 'connected' && 
+            p.user && 
+            p.user.id === me.id
+          );
+          
+          const customerParticipant = conversation.participants.find(p => p.purpose === 'customer');
+          
+          if (agentParticipant && customerParticipant) {
+            log("Found active conversation with customer!");
+            log("Agent participant:", agentParticipant);
+            log("Customer participant:", customerParticipant);
+            
+            // Store the conversation data
+            v_conversationId = conversation.id;
+            v_toaddress = customerParticipant.address;
+            
+            // Check for attributes
+            if (customerParticipant.attributes) {
+              v_workspace_id = customerParticipant.attributes.workspace_id;
+              v_sms_from_address = customerParticipant.attributes.sms_from_address;
+              log("Customer attributes found:", customerParticipant.attributes);
+            } else {
+              log("No attributes found in customer participant");
+              // For testing, you might want to set a default workspace ID
+              // v_workspace_id = "your-default-workspace-id";
+            }
+            
+            // Update UI
+            updateConversationInfo();
+            
+            return conversation;
+          }
+        }
+        
+        log("No active conversation with customer found");
+        return null;
+        
+      } catch (error) {
+        logError("Error fetching active conversations:", error);
+        return null;
       }
     }
 
