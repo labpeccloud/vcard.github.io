@@ -562,13 +562,78 @@ END:VCARD`;
         
         log(`Generated filename: ${filename}`);
         
-        // Convert vCard content to blob
-        const blob = new Blob([vcardContent], { type: 'text/vcard' });
-        log(`Blob created with size: ${blob.size} bytes`);
+        // Step 2: Create document in workspace with content
+        log("Step 2: Creating document with content in workspace...");
         
-        // Step 2: Create document in workspace
-        log("Step 2: Creating document in workspace...");
+        const createDocumentBody = {
+          name: filename,
+          workspace: {
+            id: v_workspace_id
+          },
+          filename: filename,
+          contentType: 'text/vcard',
+          // Try including content directly in the creation request
+          body: vcardContent
+        };
         
+        log("🔗 API Call: POST /api/v2/contentmanagement/documents");
+        log("📤 Request Body:", JSON.stringify(createDocumentBody, null, 2));
+        
+        try {
+          // Method 1: Try creating document with content directly
+          const document = await contentManagementApi.postContentmanagementDocuments(createDocumentBody);
+          
+          log("✅ Step 3: Document created with content successfully!");
+          log("📥 API Response:", JSON.stringify(document, null, 2));
+          log(`Document ID: ${document.id}`);
+          
+          // Monitor the upload status
+          log("Step 4: Monitoring document processing...");
+          const finalDocument = await monitorUploadStatus(document.id);
+          
+          if (finalDocument) {
+            // Get sharing URI
+            log("Step 5: Retrieving document sharing URI...");
+            log(`🔗 API Call: GET /api/v2/contentmanagement/documents/${finalDocument.id}`);
+            
+            const documentDetails = await contentManagementApi.getContentmanagementDocument(finalDocument.id);
+            
+            log("📥 Document Details API Response:", JSON.stringify(documentDetails, null, 2));
+            log("✅ Document upload completed successfully!");
+            log(`Final Document ID: ${documentDetails.id}`);
+            log(`Sharing URI: ${documentDetails.sharingUri || 'Not available'}`);
+            
+            logSuccess(`vCard uploaded! Document ID: ${documentDetails.id}`);
+            
+            return {
+              documentId: documentDetails.id,
+              sharingUri: documentDetails.sharingUri,
+              filename: filename
+            };
+          }
+          
+        } catch (directUploadError) {
+          log("⚠️ Direct upload method failed, trying alternative approach...");
+          logError("📥 Direct upload API error response:", directUploadError);
+          
+          // Method 2: Alternative approach using replace content
+          return await uploadVCardAlternative(vcardContent, filename);
+        }
+        
+        return null;
+        
+      } catch (error) {
+        logError("❌ Error uploading vCard to workspace:", error);
+        return null;
+      }
+    }
+
+    // Alternative upload method using replace content
+    async function uploadVCardAlternative(vcardContent, filename) {
+      try {
+        log("🔄 Step 2B: Creating empty document first...");
+        
+        // Create empty document first
         const createDocumentBody = {
           name: filename,
           workspace: {
@@ -578,58 +643,72 @@ END:VCARD`;
           contentType: 'text/vcard'
         };
         
-        log("Document creation request body:", createDocumentBody);
+        log("🔗 API Call: POST /api/v2/contentmanagement/documents (empty document)");
+        log("📤 Request Body:", JSON.stringify(createDocumentBody, null, 2));
         
         const document = await contentManagementApi.postContentmanagementDocuments(createDocumentBody);
         
-        log("Step 3: Document created successfully!");
+        log("✅ Empty document created successfully!");
+        log("📥 API Response:", JSON.stringify(document, null, 2));
         log(`Document ID: ${document.id}`);
-        log(`Upload URL: ${document.uploadDestinationUri}`);
         
-        // Step 4: Upload file content to the provided URL
-        log("Step 4: Uploading vCard content to document...");
+        // Step 3B: Try to update document with content using replace
+        log("🔄 Step 3B: Updating document with content...");
         
-        const uploadResponse = await fetch(document.uploadDestinationUri, {
-          method: 'PUT',
-          body: blob,
-          headers: {
-            'Content-Type': 'text/vcard'
-          }
-        });
-        
-        if (!uploadResponse.ok) {
-          throw new Error(`Upload failed with status: ${uploadResponse.status}`);
+        try {
+          // Use the replace content endpoint
+          const replaceBody = {
+            body: vcardContent,
+            contentType: 'text/vcard'
+          };
+          
+          log(`🔗 API Call: POST /api/v2/contentmanagement/documents/${document.id}/content`);
+          log("📤 Request Body:", JSON.stringify(replaceBody, null, 2));
+          
+          const replaceResponse = await contentManagementApi.postContentmanagementDocumentContent(document.id, replaceBody);
+          
+          log("✅ Document content updated successfully!");
+          log("📥 Replace Content API Response:", JSON.stringify(replaceResponse, null, 2));
+          
+        } catch (replaceError) {
+          log("⚠️ Replace content method also failed, trying basic approach...");
+          logError("📥 Replace content API error response:", replaceError);
+          
+          // Method 3: Just return the document without content for now
+          log("🔄 Creating document without content for testing...");
         }
         
-        log("Step 5: File content uploaded successfully!");
-        
-        // Step 6: Monitor upload status
-        log("Step 6: Monitoring upload status...");
-        
+        // Monitor the document status
+        log("🔄 Step 4B: Monitoring document status...");
         const finalDocument = await monitorUploadStatus(document.id);
         
         if (finalDocument) {
-          // Step 7: Get sharing URI
-          log("Step 7: Retrieving document sharing URI...");
+          // Get sharing URI
+          log("🔄 Step 5B: Retrieving document details...");
+          log(`🔗 API Call: GET /api/v2/contentmanagement/documents/${finalDocument.id}`);
+          
           const documentDetails = await contentManagementApi.getContentmanagementDocument(finalDocument.id);
           
-          log("Document upload completed successfully!");
-          log(`Final Document ID: ${documentDetails.id}`);
+          log("📥 Final Document Details API Response:", JSON.stringify(documentDetails, null, 2));
+          log("✅ Alternative upload method completed!");
+          log(`Document ID: ${documentDetails.id}`);
           log(`Sharing URI: ${documentDetails.sharingUri || 'Not available'}`);
           
-          logSuccess(`vCard uploaded! Document ID: ${documentDetails.id}`);
+          logSuccess(`vCard document created! Document ID: ${documentDetails.id}`);
           
           return {
             documentId: documentDetails.id,
             sharingUri: documentDetails.sharingUri,
-            filename: filename
+            filename: filename,
+            note: "Document created, content upload may need manual handling"
           };
         }
         
         return null;
         
       } catch (error) {
-        logError("Error uploading vCard to workspace:", error);
+        logError("❌ Alternative upload method failed:", error);
+        logError("📥 Alternative method API error response:", error);
         return null;
       }
     }
@@ -637,33 +716,41 @@ END:VCARD`;
     // Monitor upload status
     async function monitorUploadStatus(documentId, maxRetries = 10) {
       try {
-        log(`Monitoring upload status for document ID: ${documentId}`);
+        log(`🔄 Monitoring upload status for document ID: ${documentId}`);
         
         for (let i = 0; i < maxRetries; i++) {
-          log(`Status check attempt ${i + 1}/${maxRetries}...`);
+          log(`📊 Status check attempt ${i + 1}/${maxRetries}...`);
+          log(`🔗 API Call: GET /api/v2/contentmanagement/documents/${documentId}`);
           
           const document = await contentManagementApi.getContentmanagementDocument(documentId);
           
-          log(`Current upload status: ${document.uploadStatus?.status || 'Unknown'}`);
+          log(`📥 Status Check API Response:`, JSON.stringify(document, null, 2));
+          log(`📈 Current upload status: ${document.uploadStatus?.status || 'Unknown'}`);
           
           if (document.uploadStatus?.status === 'UPLOAD_SUCCESS') {
-            logSuccess("Upload completed successfully!");
+            logSuccess("✅ Upload completed successfully!");
             return document;
           } else if (document.uploadStatus?.status === 'UPLOAD_FAILED') {
-            logError("Upload failed!");
+            logError("❌ Upload failed!");
+            log("📥 Failed document details:", JSON.stringify(document, null, 2));
             return null;
+          } else if (document.uploadStatus?.status === 'UPLOAD_IN_PROGRESS') {
+            log("⏳ Upload still in progress...");
+          } else {
+            log(`ℹ️ Upload status: ${document.uploadStatus?.status || 'Not set'}`);
           }
           
           // Wait 2 seconds before next check
-          log("Waiting 2 seconds before next status check...");
+          log("⏱️ Waiting 2 seconds before next status check...");
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
         
-        logError("Upload status monitoring timed out");
+        logError("⏰ Upload status monitoring timed out");
         return null;
         
       } catch (error) {
-        logError("Error monitoring upload status:", error);
+        logError("❌ Error monitoring upload status:", error);
+        logError("📥 Monitor status API error response:", error);
         return null;
       }
     }
