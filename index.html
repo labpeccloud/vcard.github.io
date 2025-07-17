@@ -645,6 +645,16 @@ END:VCARD`;
         log(`📄 File Name: ${filename}`);
         log(`📝 Content Length: ${vcardContent.length} characters`);
         
+        // Debug: Check authentication status
+        log("🔍 Checking authentication status...");
+        if (!genesysClient.authData || !genesysClient.authData.accessToken) {
+          throw new Error("No authentication token available");
+        }
+        
+        const token = genesysClient.authData.accessToken;
+        log(`🔑 Token available: ${token.substring(0, 20)}...`);
+        log(`🔑 Token expires: ${genesysClient.authData.tokenExpiryTimeUtcSeconds || 'Unknown'}`);
+        
         // Create FormData for multipart upload
         const formData = new FormData();
         
@@ -658,11 +668,12 @@ END:VCARD`;
         
         // Prepare headers with authentication
         const headers = {
-          'Authorization': `Bearer ${genesysClient.authData.accessToken}`
+          'Authorization': `Bearer ${token}`
           // Note: Don't set Content-Type header - let browser set it with boundary for multipart
         };
         
-        log("🔑 Added authorization header for upload");
+        log("🔑 Prepared headers with authorization");
+        log("📤 Headers being sent:", JSON.stringify(headers, null, 2));
         
         // Perform the upload
         log("🚀 Sending authenticated multipart POST request to upload destination...");
@@ -674,6 +685,7 @@ END:VCARD`;
         });
         
         log(`📥 Upload Response Status: ${uploadResponse.status} ${uploadResponse.statusText}`);
+        log(`📥 Upload Response Headers:`, JSON.stringify([...uploadResponse.headers.entries()], null, 2));
         
         if (!uploadResponse.ok) {
           const errorText = await uploadResponse.text();
@@ -683,6 +695,17 @@ END:VCARD`;
           if (uploadResponse.status === 401) {
             logError("🔑 Authentication failed - token may be expired or invalid");
             logError("💡 Try refreshing your authentication or check token permissions");
+            logError("🔍 Current token (first 50 chars): " + token.substring(0, 50) + "...");
+            
+            // Try to test the token with a simple API call
+            log("🧪 Testing token with a simple API call...");
+            try {
+              const testUser = await usersApi.getUsersMe();
+              log("✅ Token works for getUsersMe - issue might be with upload endpoint permissions");
+            } catch (testError) {
+              logError("❌ Token doesn't work for basic API calls either:", testError);
+            }
+            
           } else if (uploadResponse.status === 403) {
             logError("🚫 Access forbidden - check workspace permissions");
           } else if (uploadResponse.status === 413) {
@@ -714,11 +737,11 @@ END:VCARD`;
         if (error.message.includes('Failed to fetch') || error.name === 'TypeError') {
           logError("🚫 This appears to be a CORS (Cross-Origin) error.");
           logError("💡 Browser security prevents direct uploads to Genesys Cloud upload URLs.");
-          logError("🔧 Possible solutions:");
-          logError("   1. Use a server-side proxy to handle the upload");
-          logError("   2. Use Genesys Cloud's file upload widget");
-          logError("   3. Upload via server-side integration");
         }
+        
+        // Try alternative approach if upload fails
+        logError("🔄 Upload to destination failed. This might be due to CORS restrictions in browser environments.");
+        logError("💡 Alternative: The document was created successfully, you can manually upload the content or use a server-side approach.");
         
         return false;
       }
